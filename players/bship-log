@@ -1,0 +1,15 @@
+winner = draw, loser = draw, rule = hit-all, reason = draw
+winner = draw, loser = draw, rule = hit-all, reason = draw
+winner = draw, loser = draw, rule = hit-all, reason = draw
+winner = draw, loser = draw, rule = hit-all, reason = draw
+winner = ex3, loser = random, rule = hit-all, reason = sunk all in 61 rounds, winner probably = ??
+winner = ex3, loser = random, rule = hit-all, reason = sunk all in 76 rounds, winner probably = ??
+winner = ex3, loser = ex2, rule = hit-all, reason = sunk all in 76 rounds, winner probably = ??
+winner = ex4, loser = random, rule = hit-all, reason = sunk all in 67 rounds, winner probably = ??
+winner = ex4, loser = random, rule = hit-all, reason = sunk all in 67 rounds, winner probably = ??
+winner = ex5, loser = random, rule = hit-all, reason = sunk all in 67 rounds, winner probably = ??
+winner = ex5, loser = ex5, rule = hit-all, reason = sunk all in 69 rounds, winner probably = ??
+winner = 03250211, loser = ex5, rule = hit-all, reason = sunk all in 59 rounds, winner probably = ??
+winner = 03250211, loser = ex3, rule = hit-all, reason = sunk all in 62 rounds, winner probably = ??
+winner = 03250211, loser = ex3, rule = hit-all, reason = sunk all in 60 rounds, winner probably = ??
+winner = ex5, loser = ex3, rule = hit-all, reason = sunk all in 69 rounds, winner probably = ??
