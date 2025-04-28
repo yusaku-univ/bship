@@ -1,23 +1,29 @@
 /* -------------------------------------------------
    player.c – Hunt & Target Battleship Player
-   (c) ChatGPT strongest sample 2025
+   ① ループ無しで盤面初期化・S 周囲除外
+   ② B/C/D/S 撃沈時に周囲 8 マスを NOSHIP
+   ③ HUNT (市松) ＆ TARGET 戦略で攻撃
    ------------------------------------------------- */
-
    #include <stdio.h>
    #include <stdlib.h>
    #include <string.h>
    #include <my-ipc.h>
    #include <client-side.h>
    #include <redundant.h>
-   #include <public.h>          /* MSG_LEN, BD_SIZE など */
+   #include <public.h>       /* MSG_LEN, BD_SIZE など ─ BD_SIZE は 9 */
    
-   /*-----------------------------------------------
-     定数・列挙型
-     ---------------------------------------------*/
-   const char myName[]   = "strongest";
+   #define QMAX 128          /* ターゲットキュー上限 */
+   
+   /* ---------- 定数 / 列挙型 ------------------------------------------ */
+   const char myName[] = "strongest";
+   
    const char deployment[] =
-     "Ba3a4a5a6 Cc1c2c3 Cc5c6c7 De1e2 De4e5 De7e8 "
-     "Sg1 Sg3 Sg5 Sg7 ";
+     "Bd5e5f5g5 "
+     "Ci1i2i3 "
+     "Cc6c7c8 "
+     "Df1f2 "
+     "Dh7h8 "
+     "Sa1 Sc3 Se7 Sg5 ";
    
    enum cell {
      UNKNOWN,
@@ -29,66 +35,108 @@
      SSHIP
    };
    
-   /*-----------------------------------------------
-     盤面とゲーム状態
-     ---------------------------------------------*/
+   /* ---------- 盤面 & 状態 ------------------------------------------- */
    static enum cell enemy[BD_SIZE][BD_SIZE];
-   static int  cur_x, cur_y;              /* 直前に撃った座標            */
+   static int  cur_x, cur_y;                 /* 直前の攻撃座標           */
    
-   static enum { HUNT, TARGET } mode = HUNT;
+   static enum { HUNT, TARGET } mode = HUNT; /* フェーズ */
    
-   /* 方向ベクトル */
-   static const int dir4[4][2] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
-   
-   /* ターゲットキュー (単純リングバッファ) */
-   #define QMAX  128
    typedef struct { int x, y; } Point;
+   
+   /* --- ターゲットキュー（リングバッファ） --------------------------- */
    static Point queue[QMAX];
-   static int qhead = 0, qtail = 0;
-   #define Q_EMPTY (qhead == qtail)
+   static int qh = 0, qt = 0;
+   #define Q_EMPTY (qh == qt)
    static void q_push(int x, int y){
-     if(enemy[x][y] == UNKNOWN){      /* 未知マスのみ */
-       queue[qtail++] = (Point){x,y};
-       if(qtail >= QMAX) qtail = 0;
+     if(enemy[x][y] == UNKNOWN){
+       queue[qt++] = (Point){x,y};
+       if(qt >= QMAX) qt = 0;
      }
    }
    static Point q_pop(void){
-     Point p = queue[qhead++];
-     if(qhead >= QMAX) qhead = 0;
+     Point p = queue[qh++];
+     if(qh >= QMAX) qh = 0;
      return p;
    }
    
-   /*-----------------------------------------------
-     初期化
-     ---------------------------------------------*/
+   /* ---------- ヘルパ: ループ無しで初期化 ---------------------------- */
    static void init_board(void)
    {
-     for(int x=0; x<BD_SIZE; x++)
-       for(int y=0; y<BD_SIZE; y++)
-         enemy[x][y] = UNKNOWN;
+     /* 配列全体を UNKNOWN で埋める */
+     memset(enemy, UNKNOWN, sizeof(enemy));
    
-     /* たとえば (0,0) が岩なら：*/
+     /* 岩マスだけ個別指定 (例として 0,0) */
      enemy[0][0] = ROCK;
    }
    
-   /*-----------------------------------------------
-     周囲 8 マスを NOSHIP にする (Submarine 撃沈時)
-     ---------------------------------------------*/
+   /* ---------- ヘルパ: S 撃沈時に周囲を NOSHIP ---------------------- */
+   static void set_if_unknown(int nx, int ny){
+     if(nx>=0 && nx<BD_SIZE && ny>=0 && ny<BD_SIZE &&
+        enemy[nx][ny] == UNKNOWN)
+       enemy[nx][ny] = NOSHIP;
+   }
+   
    static void mark_around_noship(int x, int y)
    {
-     for(int dx=-1; dx<=1; dx++){
-       for(int dy=-1; dy<=1; dy++){
-         int nx=x+dx, ny=y+dy;
-         if(nx<0||nx>=BD_SIZE||ny<0||ny>=BD_SIZE) continue;
-         if(enemy[nx][ny] == UNKNOWN)
-           enemy[nx][ny] = NOSHIP;
-       }
+     /* 左上から時計回りに 8 マスを列挙 */
+     set_if_unknown(x-1, y+1);
+     set_if_unknown(x  , y+1);
+     set_if_unknown(x+1, y+1);
+     set_if_unknown(x-1, y  );
+     set_if_unknown(x+1, y  );
+     set_if_unknown(x-1, y-1);
+     set_if_unknown(x  , y-1);
+     set_if_unknown(x+1, y-1);
+   }
+   
+   /* ---------- 連結艦を DFS で収集 → 沈没判定 ----------------------- */
+   static int collect_component(int x,int y, enum cell tp,
+                                Point buf[], int *n)
+   {
+     if(x<0||x>=BD_SIZE||y<0||y>=BD_SIZE) return 0;
+     if(enemy[x][y] != tp)                return 0;
+   
+     enemy[x][y] = (enum cell)(tp | 0x80);        /* 訪問済みフラグ */
+     buf[(*n)++] = (Point){x,y};
+   
+     collect_component(x+1,y,tp,buf,n);
+     collect_component(x-1,y,tp,buf,n);
+     collect_component(x,y+1,tp,buf,n);
+     collect_component(x,y-1,tp,buf,n);
+     return 1;
+   }
+   
+   static void restore_marks(Point comp[], int n, enum cell tp){
+     for(int i=0;i<n;i++) enemy[comp[i].x][comp[i].y] = tp;
+   }
+   
+   static void check_and_mark_sunk(int x,int y)
+   {
+     enum cell tp = enemy[x][y];
+     int need = (tp==BSHIP)?4 : (tp==CSHIP)?3 : (tp==DSHIP)?2 : 0;
+     if(need == 0) return;                         /* S は対象外 */
+   
+     Point comp[9]; int cnt = 0;
+     collect_component(x,y,tp,comp,&cnt);
+     restore_marks(comp,cnt,tp);
+   
+     if(cnt == need){                              /* 沈没確定 */
+       for(int i=0;i<cnt;i++)
+         mark_around_noship(comp[i].x, comp[i].y);
      }
    }
    
-   /*-----------------------------------------------
-     record_result : line[13] の文字に応じ盤面を更新
-     ---------------------------------------------*/
+   /* ---------- 方向配列 & HUNT カーソル ------------------------------ */
+   static const int dir4[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
+   static int hunt_x=0, hunt_y=0;
+   static void advance_hunt_cursor(void){
+     do{
+       hunt_x++;
+       if(hunt_x>=BD_SIZE){ hunt_x=0; hunt_y++; if(hunt_y>=BD_SIZE) hunt_y=0; }
+     }while( (hunt_x+hunt_y)&1 );   /* 市松 parity */
+   }
+   
+   /* ---------- record_result ---------------------------------------- */
    static void record_result(int x,int y,char line[])
    {
      char r = line[13];
@@ -98,157 +146,76 @@
        case 'C': enemy[x][y] = CSHIP; break;
        case 'D': enemy[x][y] = DSHIP; break;
        case 'S': enemy[x][y] = SSHIP; break;
-       case 'R': enemy[x][y] = ROCK;  break;
-       default : enemy[x][y] = NOSHIP;break; /* miss or water */
+       case 'R': enemy[x][y] = ROCK ; break;
+       default : enemy[x][y] = NOSHIP;break;
      }
    
-     /*--- 命中時の処理 --------------------------------*/
-     if(r=='B' || r=='C' || r=='D' || r=='S'){
-       /* TARGET フェーズ突入 */
+     /* 命中時の処理 */
+     if(r=='B'||r=='C'||r=='D'||r=='S'){
        mode = TARGET;
    
-       if(r == 'S'){                /* 1マス艦は即座に周囲を除外 */
-         mark_around_noship(x, y);
-       }else{
-         /* 四方向に隣接マスをキューに積む */
-         for(int i=0;i<4;i++){
-           int nx = x + dir4[i][0];
-           int ny = y + dir4[i][1];
-           if(nx>=0 && nx<BD_SIZE && ny>=0 && ny<BD_SIZE)
-             q_push(nx, ny);
-         }
+       if(r=='S'){                                  /* 潜水艦は1マス */
+         mark_around_noship(x,y);
+       }else{                                       /* 他艦：隣接をキューへ */
+         for(int i=0;i<4;i++)
+           q_push(x+dir4[i][0], y+dir4[i][1]);
        }
      }
    
-     /*--- キューが空なら TARGET 終了 --------------------*/
-     if(Q_EMPTY)
-       mode = HUNT;
+     /* B/C/D 沈没チェック */
+     if(enemy[x][y]==BSHIP||enemy[x][y]==CSHIP||enemy[x][y]==DSHIP)
+       check_and_mark_sunk(x,y);
+   
+     if(Q_EMPTY) mode = HUNT;
    }
    
-   /*-----------------------------------------------
-     探索パターン（市松模様）用カーソル
-     ---------------------------------------------*/
-   static int hunt_x = 0, hunt_y = 0;
-   static void advance_hunt_cursor(void)
-   {
-     /* 市松模様 (奇偶パリティ) を維持しながら線形に回す */
-     do {
-       hunt_x++;
-       if(hunt_x >= BD_SIZE){
-         hunt_x = 0;
-         hunt_y++;
-         if(hunt_y >= BD_SIZE) hunt_y = 0;
-       }
-     }while( ((hunt_x+hunt_y)&1) ); /* parity 合わないときスキップ */
-   }
-   
-   /*-----------------------------------------------
-     respond_with_shot : HUNT / TARGET 戦略で次弾決定
-     ---------------------------------------------*/
+   /* ---------- respond_with_shot ----------------------------------- */
    static void respond_with_shot(void)
    {
-     char shot_string[MSG_LEN];
-     int x, y;
+     char shot[MSG_LEN];
+     int x,y;
    
      while(1){
-       if(mode == TARGET && !Q_EMPTY){
-         /* キュー先頭から取り出す */
-         Point p = q_pop();
-         x = p.x; y = p.y;
+       if(mode==TARGET && !Q_EMPTY){
+         Point p=q_pop(); x=p.x; y=p.y;
        }else{
-         /* HUNT フェーズ：市松模様探索 */
-         x = hunt_x; y = hunt_y;
-         advance_hunt_cursor();
+         x=hunt_x; y=hunt_y; advance_hunt_cursor();
        }
-   
-       /* 未知マスのみ撃つ */
-       if(enemy[x][y] == UNKNOWN)
-         break;
+       if(enemy[x][y]==UNKNOWN) break;              /* 未攻撃マスのみ */
      }
    
-     /* 発射 */
-     printf("[%s] shooting at %d%d ... ", myName, x, y);
-     sprintf(shot_string, "%d%d", x, y);
-     send_to_ref(shot_string);
-     cur_x = x;
-     cur_y = y;
+     sprintf(shot,"%d%d",x,y);
+     printf("[%s] shooting at %s ... ", myName, shot);
+     send_to_ref(shot);
+     cur_x=x; cur_y=y;
    }
    
-   /*-----------------------------------------------
-     可視化 (デバッグ)
-     ---------------------------------------------*/
-   static void print_board(void)
-   {
-     for(int y=BD_SIZE-1; y>=0; y--){
-       printf("%2d ", y);
-       for(int x=0; x<BD_SIZE; x++){
-         char c='?';
-         switch(enemy[x][y]){
-           case UNKNOWN: c='U'; break;
-           case ROCK   : c='R'; break;
-           case NOSHIP : c='.'; break;
-           case BSHIP  : c='B'; break;
-           case CSHIP  : c='C'; break;
-           case DSHIP  : c='D'; break;
-           case SSHIP  : c='S'; break;
-         }
-         printf("%c ", c);
-       }
-       printf("\n");
-     }
-     printf("   ");
-     for(int x=0;x<BD_SIZE;x++) printf("%2d",x);
-     printf("\n\n");
-   }
+   /* ---------- ネットワーク I/O ラッパ ------------------------------ */
+   static void send_name(void){  char*s=strdup(myName); send_to_ref(s); free(s);}
+   static void send_deploy(void){char*s=strdup(deployment); send_to_ref(s);free(s);}
    
-   /*-----------------------------------------------
-     ネットワーク I/O ラッパ
-     ---------------------------------------------*/
-   static void respond_with_name(void)
-   {
-     char *str = strdup(myName);
-     send_to_ref(str); free(str);
-   }
-   
-   static void respond_with_deployment(void)
-   {
-     char *str = strdup(deployment);
-     send_to_ref(str); free(str);
-   }
-   
-   /*-----------------------------------------------
-     メインループ
-     ---------------------------------------------*/
+   /* ---------- メインハンドラ -------------------------------------- */
    static void handle_messages(void)
    {
      char line[MSG_LEN];
-   
      srand(getpid());
      init_board();
    
      while(TRUE){
        receive_from_ref(line);
    
-       if(message_has_type(line, "name?")){
-         respond_with_name();
-       }else if(message_has_type(line, "deployment?")){
-         respond_with_deployment();
-       }else if(message_has_type(line, "shot?")){
-         respond_with_shot();
-       }else if(message_has_type(line, "shot-result:")){
-         record_result(cur_x, cur_y, line);
+       if(message_has_type(line,"name?"))          send_name();
+       else if(message_has_type(line,"deployment?")) send_deploy();
+       else if(message_has_type(line,"shot?"))       respond_with_shot();
+       else if(message_has_type(line,"shot-result:")){
+         record_result(cur_x,cur_y,line);
          printf("[%s] result: %c\n", myName, line[13]);
-   #ifdef DEBUG_VIEW
-         print_board();          /* 必要なら板表示 */
-   #endif
-       }else if(message_has_type(line, "end:")){
-         break;
-       }else{
-         printf("[%s] ignoring message: %s", myName, line);
        }
+       else if(message_has_type(line,"end:")) break;
      }
    }
    
+   /* ---------- main ------------------------------------------------- */
    int main(void)
    {
      client_make_connection();
